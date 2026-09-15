@@ -259,7 +259,20 @@ print('\n[4] _parse_telegram_link')
 P = server._parse_telegram_link
 
 cases = [
-    ('https://t.me/feihsl/25158?single&t=4', 'tg://resolve?domain=feihsl&post=25158'),
+    # 相册定位 (2026-09-15 真机验证: 必须 single + t 同时存在才落到第 N 个媒体)
+    ('https://t.me/feihsl/25158?single&t=4',
+     'tg://resolve?domain=feihsl&post=25158&single&t=4'),
+    ('https://t.me/c/1234567/25158?single&t=2',
+     'tg://privatepost?channel=1234567&post=25158&single&t=2'),
+    # t 单独出现无效 (真机验证过), 不应透传
+    ('https://t.me/feihsl/25158?t=4', 'tg://resolve?domain=feihsl&post=25158'),
+    # 非数字 / 越界的 t 忽略, 但 single 本身不影响基础跳转
+    ('https://t.me/feihsl/25158?single&t=abc', 'tg://resolve?domain=feihsl&post=25158'),
+    ('https://t.me/feihsl/25158?single&t=0', 'tg://resolve?domain=feihsl&post=25158'),
+    ('https://t.me/feihsl/25158?single&t=99', 'tg://resolve?domain=feihsl&post=25158'),
+    # 只有频道没有消息号时不追加相册参数
+    ('https://t.me/feihsl?single&t=4', 'tg://resolve?domain=feihsl'),
+    # 常规链接
     ('https://t.me/feihsl/25158', 'tg://resolve?domain=feihsl&post=25158'),
     ('t.me/feihsl/25158', 'tg://resolve?domain=feihsl&post=25158'),
     ('https://telegram.me/some_channel/123', 'tg://resolve?domain=some_channel&post=123'),
@@ -268,11 +281,25 @@ cases = [
     ('https://t.me/c/1234567', 'tg://privatepost?channel=1234567'),
     ('tg://resolve?domain=feihsl&post=25158', 'tg://resolve?domain=feihsl&post=25158'),
     ('tg://privatepost?channel=111&post=222', 'tg://privatepost?channel=111&post=222'),
+    # 已是 tg:// 且自带 single&t 时原样保留
+    ('tg://resolve?domain=feihsl&post=25158&single&t=4',
+     'tg://resolve?domain=feihsl&post=25158&single&t=4'),
 ]
 for url, want in cases:
     got = P(url)
-    check(f'解析 {url[:40]}', bool(got) and got['tg_url'] == want,
+    check(f'解析 {url[:46]}', bool(got) and got['tg_url'] == want,
           got and got['tg_url'])
+
+# album_index 只在该带的时候带
+check('相册链接给出 album_index=4',
+      (P('https://t.me/feihsl/25158?single&t=4') or {}).get('album_index') == 4,
+      P('https://t.me/feihsl/25158?single&t=4'))
+check('非相册链接无 album_index',
+      (P('https://t.me/feihsl/25158') or {}).get('album_index') is None,
+      P('https://t.me/feihsl/25158'))
+check('tg:// 自带参数能识别 album_index',
+      (P('tg://resolve?domain=feihsl&post=25158&single&t=4') or {}).get('album_index') == 4,
+      P('tg://resolve?domain=feihsl&post=25158&single&t=4'))
 
 bad = ['', 'https://example.com/x', 'https://t.me/', 'http://evil.com/t.me/a/1',
        'tg://', 'tg://unknown?x=1', 'https://v.qq.com/x/1', '随便什么']
@@ -288,17 +315,21 @@ resp = client.post(f'/api/file/{H_B}/bind_telegram',
                    json={'url': 'not a link'})
 check('非法链接返回 400', resp.status_code == 400, resp.status_code)
 
+TG_WITH_ALBUM = 'tg://resolve?domain=feihsl&post=25158&single&t=4'
+
 resp = client.post(f'/api/file/{H_B}/bind_telegram',
                    json={'url': 'https://t.me/feihsl/25158?single&t=4'})
 out = resp.get_json()
 check('绑定成功', resp.status_code == 200 and out.get('ok') is True, out)
-check('返回 tg_url', out.get('telegram_link', {}).get('tg_url')
-      == 'tg://resolve?domain=feihsl&post=25158', out)
+check('返回 tg_url 带相册定位', out.get('telegram_link', {}).get('tg_url')
+      == TG_WITH_ALBUM, out)
+check('返回 album_index=4', out.get('telegram_link', {}).get('album_index') == 4, out)
 
 # 详情能看到绑定
 resp = client.get(f'/api/file/{H_B}')
 tl = resp.get_json().get('telegram_link') or {}
-check('详情暴露 telegram_link', tl.get('tg_url') == 'tg://resolve?domain=feihsl&post=25158', tl)
+check('详情暴露 telegram_link', tl.get('tg_url') == TG_WITH_ALBUM, tl)
+check('详情暴露 album_index', tl.get('album_index') == 4, tl)
 check('详情暴露 document_id', bool(resp.get_json().get('document_id')),
       resp.get_json().get('document_id'))
 
@@ -315,6 +346,29 @@ moved = mkf('NEWBB1111', FileType.SERIALIZED_VIDEO, len(header_blob), is_large_v
 server.binlog_index['NEWBB1111'] = server.binlog_index[H_B]
 check('换文件名后 (同 doc) 绑定仍命中',
       bool(server._get_telegram_link(moved)), server._get_telegram_link(moved))
+
+# 老绑定升级: 早期写入的 tg_url 丢了 ?single&t=N, 重读盘时应按 source_url 补回
+disk = json.load(open(server.TELEGRAM_LINKS_PATH, encoding='utf-8'))
+disk['doc:LEGACY0000000001'] = {
+    'tg_url': 'tg://resolve?domain=feihsl&post=25158',
+    'source_url': 'https://t.me/feihsl/25158?single&t=4',
+    'display': 'https://t.me/feihsl/25158',
+    'bound_at': 0,
+}
+with open(server.TELEGRAM_LINKS_PATH, 'w', encoding='utf-8') as fh:
+    json.dump(disk, fh, ensure_ascii=False, indent=2)
+server._telegram_links_cache = None
+upgraded = server._load_telegram_links().get('doc:LEGACY0000000001') or {}
+check('老绑定自动补回相册定位', upgraded.get('tg_url') == TG_WITH_ALBUM, upgraded)
+check('老绑定补回 album_index', upgraded.get('album_index') == 4, upgraded)
+ondisk = json.load(open(server.TELEGRAM_LINKS_PATH, encoding='utf-8'))
+check('升级结果已落盘',
+      (ondisk.get('doc:LEGACY0000000001') or {}).get('tg_url') == TG_WITH_ALBUM,
+      ondisk.get('doc:LEGACY0000000001'))
+# 已带参数的绑定不应被重复改写
+check('已是新格式的绑定不动',
+      (ondisk.get(doc_key) or {}).get('tg_url') == TG_WITH_ALBUM,
+      ondisk.get(doc_key))
 
 # 解绑
 resp = client.delete(f'/api/file/{H_B}/bind_telegram')

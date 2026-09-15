@@ -501,10 +501,24 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.tg-bind-album {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #e67e22;
+    color: #fff;
+    font-size: 12px;
+}
 .tg-bind-hint {
     margin-top: 4px;
     font-size: 12px;
     color: var(--text-muted, #999);
+}
+.tg-bind-hint code {
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.06);
+    font-size: 11px;
 }
 
 .file-card-info {

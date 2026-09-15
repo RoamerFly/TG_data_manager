@@ -26,6 +26,7 @@ import subprocess
 import ctypes
 import mimetypes
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 from typing import Optional, Dict, List, Tuple
 
 from flask import Flask, request, jsonify, send_file, send_from_directory, Response, render_template
@@ -1051,6 +1052,7 @@ def _load_telegram_links() -> dict:
             _telegram_links_cache = data if isinstance(data, dict) else {}
         except Exception:
             _telegram_links_cache = {}
+        _migrate_album_params()
     return _telegram_links_cache
 
 
@@ -1083,17 +1085,48 @@ def _get_telegram_link(f: 'CacheFile') -> Optional[dict]:
     return None
 
 
+def _album_suffix(url: str) -> Tuple[str, Optional[int]]:
+    """
+    提取网页链接里的相册定位参数 (?single&t=N) → ('&single&t=N', N)
+
+    2026-09-15 真机验证 (用户逐个候选肉眼判定, 频道 feihsl 第 25158 条相册消息):
+        tg://resolve?domain=feihsl&post=25158               → 只到消息, 显示第 1 个媒体
+        tg://resolve?domain=feihsl&post=25158&t=4           → 只到消息 (t 单独无效)
+        tg://resolve?domain=feihsl&post=25158&single&t=4    → 正确落到第 4 个媒体
+        tg://resolve?domain=feihsl&post=25158&single&media=4 → 只到消息 (media 不是有效参数)
+    结论: tg:// 必须 **同时** 带 single 和 t 才会定位到相册内第 N 个媒体,
+    固定顺序 &single&t=N。t 是 1-based 的媒体序号 (不是秒数、也不是话题 id)。
+    所以 t 只在 single 存在时才透传, 避免把单条消息的 t 误解成话题 id。
+    """
+    try:
+        # keep_blank_values=True 必须带: ?single&t=4 里的 single 没有 '=',
+        # 默认会被 parse_qs 直接丢掉
+        q = parse_qs(urlparse(url).query, keep_blank_values=True)
+    except Exception:
+        return '', None
+    if 'single' not in q:
+        return '', None
+    raw = (q.get('t') or [''])[0]
+    if not raw.isdigit():
+        return '', None
+    n = int(raw)
+    if n <= 0 or n > 10:  # Telegram 单个相册最多 10 个媒体
+        return '', None
+    return f'&single&t={n}', n
+
+
 def _parse_telegram_link(url: str) -> Optional[dict]:
     """
-    解析用户提供的 Telegram 链接 → {tg_url, display}。
+    解析用户提供的 Telegram 链接 → {tg_url, display, album_index}。
 
     支持:
       https://t.me/<username>/<msg>   → tg://resolve?domain=<username>&post=<msg>
       https://t.me/c/<id>/<msg>       → tg://privatepost?channel=<id>&post=<msg>
       https://t.me/<username>         → tg://resolve?domain=<username> (只开频道)
-      tg://resolve?... / tg://privatepost?...  → 原样使用
-    ?single&t=4 之类的展示参数会被忽略 (tg:// 链接的 t 参数是话题 id,
-    与网页链接的跳转秒数含义不同, 不能透传)。
+      tg://resolve?... / tg://privatepost?...  → 原样使用 (自带 single&t= 也保留)
+
+    相册消息 (一条消息里有多个视频): 网页链接末尾的 ?single&t=N 表示"第 N 个媒体",
+    由 _album_suffix 转成 &single&t=N 追加到 tg:// 上; 不带就只能停在消息级。
     """
     if not url or not isinstance(url, str):
         return None
@@ -1102,10 +1135,16 @@ def _parse_telegram_link(url: str) -> Optional[dict]:
     if url.startswith('tg://'):
         rest = url[5:]
         if rest.startswith(('resolve', 'privatepost')):
-            return {'tg_url': url, 'display': url}
+            out = {'tg_url': url, 'display': url}
+            _, idx = _album_suffix('https://x/?' + (url.split('?', 1)[1] if '?' in url else ''))
+            if idx:
+                out['album_index'] = idx
+            return out
         return None
 
     display = url.split('?')[0].split('#')[0]
+    suffix, album_index = _album_suffix(url)
+
     # 私有频道/群: t.me/c/<id>/<msg>
     m = re.match(r'^(?:https?://)?(?:t\.me|telegram\.me)/c/(\d+)(?:/(\d+))?',
                  url, re.IGNORECASE)
@@ -1113,7 +1152,8 @@ def _parse_telegram_link(url: str) -> Optional[dict]:
         tg = f'tg://privatepost?channel={m.group(1)}'
         if m.group(2):
             tg += f'&post={m.group(2)}'
-        return {'tg_url': tg, 'display': display}
+            tg += suffix
+        return {'tg_url': tg, 'display': display, 'album_index': album_index}
 
     # 公开频道/用户名: t.me/<username>/<msg>
     m = re.match(r'^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,64})'
@@ -1122,8 +1162,32 @@ def _parse_telegram_link(url: str) -> Optional[dict]:
         tg = f'tg://resolve?domain={m.group(1)}'
         if m.group(2):
             tg += f'&post={m.group(2)}'
-        return {'tg_url': tg, 'display': display}
+            tg += suffix
+        return {'tg_url': tg, 'display': display, 'album_index': album_index}
     return None
+
+
+def _migrate_album_params() -> None:
+    """一次性升级: 早期绑定把 ?single&t=N 丢了, 用 source_url 重新补回相册定位"""
+    links = _telegram_links_cache
+    if not isinstance(links, dict):
+        return
+    changed = False
+    for v in links.values():
+        if not isinstance(v, dict):
+            continue
+        tg = v.get('tg_url') or ''
+        src = v.get('source_url') or ''
+        if not src or '&single&t=' in tg:
+            continue
+        parsed = _parse_telegram_link(src)
+        if parsed and parsed['tg_url'] != tg:
+            v['tg_url'] = parsed['tg_url']
+            if parsed.get('album_index'):
+                v['album_index'] = parsed['album_index']
+            changed = True
+    if changed:
+        _save_telegram_links()
 
 
 def _is_attributed_slice(f: 'CacheFile') -> bool:
@@ -1293,6 +1357,8 @@ def api_bind_telegram(file_id):
         'display': parsed['display'],
         'bound_at': time.time(),
     }
+    if parsed.get('album_index'):
+        entry['album_index'] = parsed['album_index']
     with _telegram_links_lock:
         links = _load_telegram_links()
         # 两个键都写: doc: (跨扫描稳定) + file: (无 binlog 时兜底)

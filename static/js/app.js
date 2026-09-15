@@ -1443,11 +1443,14 @@ function renderTelegramBindBox(f) {
     }
     const link = f.telegram_link;
     if (link && link.tg_url) {
+        const albumTag = link.album_index
+            ? `<span class="tg-bind-album">相册第 ${link.album_index} 个</span>` : '';
         box.classList.remove('hidden');
         box.innerHTML = `
             <div class="tg-bind-row">
                 <span class="tg-bind-label">Telegram 来源</span>
                 <span class="tg-bind-link" title="${escapeHtml(link.source_url || link.display || '')}">${escapeHtml(link.display || link.source_url || '')}</span>
+                ${albumTag}
                 <button class="btn btn-small" onclick="unbindTelegram('${f.file_id}')">解绑</button>
             </div>`;
     } else {
@@ -1459,7 +1462,7 @@ function renderTelegramBindBox(f) {
                        placeholder="https://t.me/频道名/消息号" spellcheck="false">
                 <button class="btn btn-small btn-secondary" onclick="bindTelegram('${f.file_id}')">绑定</button>
             </div>
-            <div class="tg-bind-hint">仅缓存未下载的视频无法自动定位原消息 —— 粘贴原视频的 t.me 链接绑定一次, 之后可一键跳转回去播放、补全缓存分片</div>`;
+            <div class="tg-bind-hint">仅缓存未下载的视频无法自动定位原消息 —— 粘贴原视频的 t.me 链接绑定一次, 之后可一键跳转回去播放、补全缓存分片。一条消息里有多个视频时, 链接末尾加上 <code>?single&amp;t=序号</code> (如第 4 个就写 <code>?single&amp;t=4</code>), 才能直接定位到那一个</div>`;
     }
 }
 

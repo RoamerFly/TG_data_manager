@@ -584,8 +584,8 @@ B 视频的分片会被错归到 A 名下。改为按 `doc_key (key_high, key_lo
    扫描/换缓存文件名后绑定依然有效。绑定后「前往 Telegram 播放」精确
    跳转 `tg://resolve?domain=feihsl&post=25158`。
    - 链接解析支持 `t.me/<用户名>/<msg>`、`t.me/c/<id>/<msg>`（私有频道）、
-     `tg://resolve|privatepost`；`?single&t=4` 等展示参数被忽略
-     （tg:// 的 `t` 参数是话题 id，含义不同，不能透传）。
+     `tg://resolve|privatepost`。相册消息的 `?single&t=N`（第 N 个媒体）
+     最初按展示参数丢弃，真机验证后改为透传 —— 见第 14 节。
 2. **已下载视频**（上一节实现）：还原真实 document_id 查 locations/downloads
    → `tg://privatepost`。
 3. **其余**：分级提示（cache_only/private_chat/unknown），并引导绑定。
@@ -603,3 +603,59 @@ B 视频的分片会被错归到 A 名下。改为按 `doc_key (key_high, key_lo
 回归（共享 key_high 串台）、合并展示（归属分片剔除/孤立分片保留/搜索）、
 合成率与排序、链接解析（9 种合法格式 + 8 种非法拒绝）、绑定/解绑/跨扫描
 键命中。全套 410 项全过。
+
+## 14. 相册消息定位：`?single&t=N` 透传（2026-09-15 真机验证）
+
+### 14.1 问题
+
+绑定 `https://t.me/feihsl/25158?single&t=4` 后跳转，只能停在消息级
+（显示相册里的第 1 个媒体），无法直接落到第 4 个视频 —— 补缓存分片时
+要手动翻，等于没定位。最初实现把 `?single&t=4` 当成网页展示参数丢弃了
+（担心 tg:// 的 `t` 是话题 id，语义不同）。
+
+### 14.2 真机验证（用户逐候选肉眼判定）
+
+频道 feihsl 第 25158 条是相册消息（多视频），`t=4` = 第 4 个媒体：
+
+| 候选 | 结果 |
+|---|---|
+| `tg://resolve?domain=feihsl&post=25158` | 只到消息 |
+| `tg://resolve?domain=feihsl&post=25158&t=4` | 只到消息（`t` 单独无效） |
+| `tg://resolve?domain=feihsl&post=25158&single&t=4` | **正确落到第 4 个媒体** |
+| `tg://resolve?domain=feihsl&post=25158&single&media=4` | 只到消息（`media` 不是有效参数） |
+| `https://t.me/feihsl/25158?single&t=4`（原链接，走浏览器） | 只到消息 |
+
+结论：**`single` 和 `t` 必须同时存在，固定顺序 `&single&t=N`**；
+`t` 是 1-based 媒体序号（不是秒数、也不是话题 id），上限按 Telegram
+相册最多 10 个媒体校验。
+
+### 14.3 实现
+
+- 新增 `_album_suffix(url)`：从网页链接 query 里取 `single` + `t`，
+  返回 `('&single&t=N', N)`。只在 `single` 存在时才透传 `t`
+  （避免把单条消息的 `t` 误解成话题 id）。
+  **坑**：`parse_qs('single&t=4')` 默认会丢掉没有 `=` 的 `single`，
+  必须 `parse_qs(..., keep_blank_values=True)`。
+- `_parse_telegram_link` 在有消息号时把 suffix 追加到 `tg://` 上，
+  并在返回值里带上 `album_index`；tg:// 输入自带的 `single&t=` 原样保留。
+- `api_bind_telegram` 落盘 `album_index`。
+- 新增 `_migrate_album_params()`：加载绑定时，若 `tg_url` 缺
+  `&single&t=` 而 `source_url` 带相册参数，自动补回并落盘
+  （已升级本机 `doc:54C0B41B0000197F` 与 `file:F642FDA8D3CD`）。
+- 前端：绑定框提示里说明相册写法，已绑定时显示橙色「相册第 N 个」标签。
+
+### 14.4 测试
+
+`tests/test_merge_and_bind.py` 45 → 61 项。新增：相册链接解析
+（公开/私有频道各一）、`t` 单独出现不生效、`t` 非数字/0/越界忽略、
+只有频道无消息号时不追加、tg:// 自带参数保留、`album_index` 取值、
+绑定接口返回 album_index、详情暴露 album_index、老绑定自动升级并落盘。
+全套 401 项全过。
+
+### 14.5 附带：验证脚本的一个 Shell 转义坑
+
+`subprocess.Popen(['cmd','/c','start','',url])` 里，Python 只对**含空格**
+的参数加引号，于是 `tg://resolve?domain=x&post=N` 不加引号交给 cmd，
+`&` 被当成命令分隔符 → 实际只执行了 `tg://resolve?domain=x` → 只进频道。
+手工给 URL 加引号（`start "" "%s"` + `shell=True`）才正确。
+应用内跳转走 `os.startfile`，不经 shell，不受影响。
