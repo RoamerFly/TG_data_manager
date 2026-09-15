@@ -132,6 +132,43 @@ print('\n[5] header 自身不被计入分片')
 slices = get_slice_records_for_header('A000', idx, allnames)
 check('结果里没有 header 自己', 'A000' not in [fn for _si, fn, _sz in slices])
 
+
+# ==================== 6. 真实 document_id 还原 (跳转功能的地基) ====================
+
+print('\n[6] real_document_id 还原公式 (2026-09-15 取证, 16/16 交叉验证)')
+
+# 地面真值: 本机真实 tdata 的视频 F642FDA8D3CD,
+#   缓存 binlog key_high = 0x154C0, key_low >> 16 = 198028057123199,
+#   locations 中对应的完整 document_id = 0x54C0B41B0000197F
+KH_REAL = 0x154C0
+DOC48_REAL = 198028057123199
+RID_REAL = 0x54C0B41B0000197F
+
+r_real = BinlogRecord(tag=0, size=8 << 20, place=b'\x00' * 7, checksum=0,
+                      key_high=KH_REAL,
+                      key_low=(DOC48_REAL << 16) | 0)
+check('取证样本: F642FDA8D3CD 还原出 0x54C0B41B0000197F',
+      r_real.real_document_id == RID_REAL, hex(r_real.real_document_id))
+check('还原出的 id 与 locations 记录的 64 位 id 同量级 (非截断的 key_high)',
+      r_real.real_document_id > (1 << 56))
+
+# 一般性: 任意真实 id -> 构造缓存键 -> 还原, 往返闭合
+for rid in (0x54C0B41B0000197F, 0x54C0B41B00001984, 0x5440C691000020FC,
+            0x0001000000000001, 0xFFFFFFFFFFFFFFFF):
+    kh = (1 << 16) | (rid >> 48)
+    kl = ((rid & 0xFFFFFFFFFFFF) << 16) | 3   # slice_index=3 不影响还原
+    r = BinlogRecord(tag=0, size=0, place=b'\x00' * 7, checksum=0,
+                     key_high=kh, key_low=kl)
+    check(f'往返闭合: 0x{rid:016X} -> 缓存键 -> 还原一致',
+          r.real_document_id == rid, hex(r.real_document_id))
+
+# 反向公式: 从 locations 真实 id 预测缓存 binlog 的键 (explore_jump6 的验证方式)
+pred_high = (1 << 16) | (RID_REAL >> 48)
+pred_doc48 = RID_REAL & 0xFFFFFFFFFFFF
+check('反向: 真实 id 可预测 key_high 与 key_low>>16',
+      pred_high == KH_REAL and pred_doc48 == DOC48_REAL,
+      (hex(pred_high), pred_doc48))
+
 print(f'\n===== {len(PASS)} passed, {len(FAIL)} failed =====')
 if FAIL:
     for f in FAIL:

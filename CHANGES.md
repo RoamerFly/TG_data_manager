@@ -479,3 +479,63 @@ index 0  = 序列化 header 自身的记录
 - 测试 365 项全过，无回归（binlog 13 / rebuild 43 / mediaparts 23 /
   pipeline 55 / e2e 31 / server 55 / mp4 50 / coverage 40 /
   deserializer 22 / clear 33）。
+
+---
+
+## 12. 「前往 Telegram 播放」：真实 document_id 还原 + 定位状态分级（2026-09-15）
+
+### 12.1 背景
+
+用户在频道「小dd的收藏夹」（t.me/feihsl）看完两部视频并完整缓存，希望从
+缓存管理软件一键跳回 Telegram 原消息播放（地面真值：t.me/feihsl/25158）。
+旧实现直接拿 binlog 的 `key_high` 当 document_id 去查 locations 索引，
+**永远查不到** —— 8 轮取证（`.temp/explore_jump*.py`）查明原因。
+
+### 12.2 关键发现：真实 document_id 还原公式（16/16 交叉验证）
+
+```
+real_document_id = ((key_high & 0xFFFF) << 48) | (key_low >> 16)
+```
+
+缓存 binlog 的 key_high 低 16 位其实是真实文档 ID 的**高 16 位**；
+key_low 的高 48 位（即 doc_key 的 document_id 部分）是真实 ID 的低 48 位。
+locations 文件里存的是完整 64 位 id。验证方式：对 locations 里全部 16 条
+DocumentFileLocation，按公式反向构造缓存键，在 media binlog 中
+**16/16 全部命中**（两份独立数据互相印证）。
+
+两个目标视频还原出的真实 id：
+`F642FDA8D3CD → 0x54C0B41B0000197F`、`A9C1006B6801 → 0x54C0B41B00001984`
+（连号，同一频道同批上传）。
+
+### 12.3 定位能力分级（本地数据边界，实测确认）
+
+| 状态 | 判定 | 跳转能力 |
+|---|---|---|
+| `downloaded` | locations 命中且有 downloads 记录 | ✅ `tg://privatepost?channel=<id>&post=<msg_id>` 精确跳转（实测 56 条全部可生成） |
+| `cache_only` | locations 命中（`*media_cache*`）但无 downloads | ❌ Telegram 对"在线播放"的媒体**不落盘消息关联**，本地无 (peer, msg) |
+| `private_chat` | downloads 记录来自私聊 | ❌ Telegram Desktop 不支持私聊消息跳转链接 |
+| `unknown` | locations 未命中 | ❌ 仅启动 Telegram |
+
+目标视频均为 `cache_only`：账号数据库里 docId 邻域 ±256B 内 msgId 四种
+编码全部无命中（56 条标注样本验证），频道名「小dd的收藏夹」/feishl 在
+当前账号快照也搜不到 —— 结论：**仅缓存未下载的视频，本地无法反查来源
+消息**，除非用户先在 Telegram 里下载/保存该视频。
+
+### 12.4 修复
+
+- `src/binlog.py`：`BinlogRecord.real_document_id` 属性（公式 + 取证注释 +
+  反向验证公式）。
+- `server.py::api_open_in_telegram`：策略 1 改用还原的真实 document_id 查
+  locations（key_high 直查降级为兜底）；响应新增 `document_id`、
+  `location_status`、分级 `hint`；启动失败时 hint 如实报告。
+- `static/js/app.js`：提示改为显示后端分级原因与文档 ID。
+- `tests/test_binlog.py` 新增第 6 节：取证样本地面真值 + 任意 id 往返
+  闭合 + 反向公式（8 项）。
+
+### 12.5 验证
+
+- `.temp/verify_jump_endpoint.py`（只读）：两个目标视频 real_doc_id 正确
+  还原并命中 locations（`cache_only`，fname=`*media_cache*`）；对照组已下载
+  文档正确产出 `tg://privatepost` URL；binlog 里 618 个 header 能命中
+  locations（locations 只保留最近约 585 条，属正常汰换）。
+- 测试 365 项全过（binlog 套件 13→21 项）。

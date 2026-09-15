@@ -77,6 +77,26 @@ class BinlogRecord:
         return (self.key_high, self.key_low >> 16)
 
     @property
+    def real_document_id(self) -> int:
+        """
+        还原真实的 64 位 document_id (用于查 locations/downloads 索引)。
+
+        **2026-09-15 取证确认, 经 locations 的 16 条 DocumentFileLocation
+        交叉验证 16/16 全部命中**:
+
+            real_document_id = ((key_high & 0xFFFF) << 48) | (key_low >> 16)
+
+        即缓存 binlog 的 key_high 低 16 位其实是真实文档 ID 的**高 16 位**,
+        key_low 的高 48 位是真实文档 ID 的低 48 位。locations 文件里存的
+        是完整 64 位 id, 直接拿 key_high 去查永远查不到。
+
+        反向验证公式 (从 locations 的真实 id 预测缓存键):
+            pred_key_high = (1 << 16) | (real_id >> 48)
+            pred_doc48    = real_id & 0xFFFFFFFFFFFF
+        """
+        return ((self.key_high & 0xFFFF) << 48) | (self.key_low >> 16)
+
+    @property
     def file_name(self) -> str:
         """PlaceId → 文件名 (nibble 反转, 大写)"""
         return _place_to_filename(self.place)

@@ -1019,10 +1019,14 @@ def api_open_in_telegram(file_id):
     在 Telegram Desktop 中打开/播放对应的原视频
 
     跳转策略 (优先级从高到低):
-    1. 从 locations + downloads 索引查找 document_id → {peerId, msgId}
+    1. 从 binlog 记录还原真实 document_id, 查 locations + downloads 索引
+       → {peerId, msgId} → tg:// URL
        - Channel/Megagroup/Chat: tg://privatepost?channel=<bareId>&post=<msgId>
        - User: 启动 Telegram (私聊消息无直接跳转 URL)
-    2. 从 binlog key_high 推断 document_id, 尝试 locations 索引
+       还原公式 (2026-09-15 取证, 16/16 交叉验证):
+           real_doc_id = ((key_high & 0xFFFF) << 48) | (key_low >> 16)
+    2. 仅缓存未下载的视频: locations 里可能有 *media_cache* 条目但无
+       downloads 记录 → 本地无消息关联, 只能启动 Telegram
     3. 仅启动 Telegram.exe (无法精确定位)
     """
     import subprocess
@@ -1045,24 +1049,34 @@ def api_open_in_telegram(file_id):
     if telegram_exe is None:
         return jsonify({'error': '未找到 Telegram.exe'}), 404
 
-    # 从 binlog 获取 key_high (可能的 document_id)
-    key_high = 0
-    if binlog_index:
-        record = binlog_index.get(f.file_name)
-        if record:
-            key_high = record.key_high
+    # 从 binlog 记录还原真实 document_id (2026-09-15 取证公式)
+    record = binlog_index.get(f.file_name) if binlog_index else None
+    key_high = record.key_high if record else 0
+    real_doc_id = record.real_document_id if record else 0
 
     # 尝试从 locations + downloads 索引查找 tg:// URL
     tg_url = None
     peer_info = None
+    location_status = 'unknown'  # downloaded / cache_only / unknown
 
     if location_index and location_index.is_loaded:
-        # 策略1: 用 binlog key_high 作为 document_id 查找
-        if key_high:
+        # 策略1: 用还原的真实 document_id 查找 (locations 存完整 64 位 id)
+        entry = None
+        if real_doc_id:
+            entry = location_index.get_by_document_id(real_doc_id)
+        # 兜底: 旧口径 (key_high 直接当 doc_id), 覆盖非标准记录
+        if entry is None and key_high:
             entry = location_index.get_by_document_id(key_high)
-            if entry and entry.get('tg_url'):
+
+        if entry:
+            d = entry.get('download')
+            loc = entry.get('location')
+            if d:
+                location_status = 'downloaded'
+            elif loc is not None:
+                location_status = 'cache_only'
+            if entry.get('tg_url'):
                 tg_url = entry['tg_url']
-                d = entry.get('download')
                 if d:
                     peer_info = {
                         'peer_type': d.peer_type,
@@ -1070,14 +1084,19 @@ def api_open_in_telegram(file_id):
                         'msg_id': d.msg_id,
                         'path': d.basename,
                     }
-
-        # 策略2: 用导出文件名匹配 downloads
-        if not tg_url:
-            # 策略2: 用导出文件名匹配 downloads (已废弃, 缓存文件名与真实文件名无直接关联)
-            pass
+            elif d and d.peer_type == 'User':
+                location_status = 'private_chat'
 
     launched = False
-    hint = '已在 Telegram 中打开'
+    if tg_url:
+        hint = '已跳转到 Telegram 对应消息'
+    elif location_status == 'private_chat':
+        hint = '该文件来自私聊, Telegram Desktop 不支持私聊消息跳转链接, 已打开 Telegram'
+    elif location_status == 'cache_only':
+        hint = ('该视频仅缓存未下载, 本地没有它的来源消息记录; '
+                '若在 Telegram 中下载/保存该视频后重试, 即可精确定位')
+    else:
+        hint = '未找到该文件的来源记录, 请在 Telegram 中搜索播放'
 
     try:
         if tg_url:
@@ -1102,17 +1121,20 @@ def api_open_in_telegram(file_id):
                     launched = True
                     hint = '已启动 Telegram, 尝试跳转 (可能需要手动查找)'
         else:
-            # 无 tg_url: 仅启动 Telegram
+            # 无 tg_url: 仅启动 Telegram (hint 已按 location_status 分类)
             subprocess.Popen([telegram_exe], creationflags=0x08000000)
             launched = True
-            hint = '未找到精确跳转信息, 请在 Telegram 中搜索该文件'
     except Exception:
         launched = False
+        hint = '启动 Telegram 失败, 请检查安装路径'
 
     return jsonify({
         'ok': launched,
         'telegram_exe': telegram_exe,
         'key_high': f'0x{key_high:016X}' if key_high else '',
+        'document_id': f'0x{real_doc_id:016X}' if real_doc_id else '',
+        'document_id_dec': real_doc_id,
+        'location_status': location_status,
         'tg_url': tg_url,
         'peer_info': peer_info,
         'hint': hint,

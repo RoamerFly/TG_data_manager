@@ -1442,16 +1442,23 @@ async function openInTelegram() {
                     if (pi.path) msg += `\n文件: ${pi.path}`;
                 }
                 toast(msg, 'success');
+            } else if (result.hint) {
+                // 后端按定位状态给出具体原因 (仅缓存未下载 / 私聊不支持跳转 / 无记录)
+                let msg = result.hint;
+                if (result.document_id) {
+                    msg += `\n文档 ID: ${result.document_id}`;
+                }
+                toast(msg, 'info');
             } else {
                 let msg = '已启动 Telegram Desktop';
-                if (result.key_high) {
-                    msg += `\n文件 ID: ${result.key_high}`;
+                if (result.document_id) {
+                    msg += `\n文档 ID: ${result.document_id}`;
                 }
                 msg += '\n未找到精确跳转信息, 请在 Telegram 中搜索播放该文件';
                 toast(msg, 'info');
             }
         } else {
-            toast('启动失败: ' + (result.error || '未知错误'), 'error');
+            toast('启动失败: ' + (result.error || result.hint || '未知错误'), 'error');
         }
     } catch (e) {
         toast('启动失败: ' + e.message, 'error');
