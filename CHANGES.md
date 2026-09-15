@@ -539,3 +539,67 @@ DocumentFileLocation，按公式反向构造缓存键，在 media binlog 中
   文档正确产出 `tg://privatepost` URL；binlog 里 618 个 header 能命中
   locations（locations 只保留最近约 585 条，属正常汰换）。
 - 测试 365 项全过（binlog 套件 13→21 项）。
+
+---
+
+## 13. 分片合并展示 + 「前往 Telegram 播放」真实跳转（2026-09-15 晚）
+
+### 13.1 分片合并展示（一个视频一条记录）
+
+**需求**：一个视频有多个分片也只展示一条，各视频按合成率从大到小排序，
+100% 的排最前显示「完整」，其余显示合成率（两位小数）；已展示视频的分片
+不允许再单独成行。
+
+**实现**（`server.py::api_files`）：
+- 已归属到 header 的分片（`_is_attributed_slice`：VIDEO_SLICE 且
+  binlog doc_key 命中 header 索引）从列表中剔除；孤立分片（所属 header
+  不在缓存里）保留展示。
+- 合成率 `synthesis_rate = min(covered_bytes, total_size) / total_size × 100`
+  （覆盖率口径，两位小数）；「完整」标签仍以权威判定
+  `coverage ⊇ required_ranges(moov)` 为准。
+- 排序：大视频（完整 → 组 0，非完整 → 组 1）按合成率降序排在最前，
+  其余文件（组 2）保持用户选择的排序方式。
+
+**顺手修复一个存量 bug**：`large_video_header_index` 原来只按 `key_high`
+索引 header —— 但不同视频会共享 key_high（两个目标视频都是 0x154C0），
+B 视频的分片会被错归到 A 名下。改为按 `doc_key (key_high, key_low>>16)`
+归属，与覆盖率判定口径一致。
+
+**真机验证**（`.temp/verify_merge_real.py`，495 个缓存文件）：
+合并后 445 项；两个目标视频各恰好一条、完整、合成率 100%、排最前；
+50 个分片（39+11）零泄漏；共享 key_high 下分片归属不串台。
+
+### 13.2 「前往 Telegram 播放」真实跳转
+
+**探索结论（第 9-13 轮，`.temp/explore_jump9..13.py`）**：仅缓存未下载的
+视频，账号数据库里**没有任何消息关联**——docId 完整 BE64 只出现在 locations
+缓存（`8473FA88B61A775Bs`）和一个 `[u32 数值][u64 docId][u32 0]`×255 的
+4KB 索引里，dialogs 库（3.5MB）零命中；频道名「小dd的收藏夹」/feishl 在
+所有账号文件（ASCII/UTF-16/varint）零命中。**本地自动反查此路不通**。
+
+**落地方案**（三级跳转优先级，`api_open_in_telegram`）：
+1. **用户绑定**（新增，最高优先级）：预览弹窗里粘贴原视频的 t.me 链接
+   （如 `https://t.me/feihsl/25158?single&t=4`），一键绑定。存储在
+   `<BASE_DIR>/telegram_links.json`，**按真实 document_id 为键**，重新
+   扫描/换缓存文件名后绑定依然有效。绑定后「前往 Telegram 播放」精确
+   跳转 `tg://resolve?domain=feihsl&post=25158`。
+   - 链接解析支持 `t.me/<用户名>/<msg>`、`t.me/c/<id>/<msg>`（私有频道）、
+     `tg://resolve|privatepost`；`?single&t=4` 等展示参数被忽略
+     （tg:// 的 `t` 参数是话题 id，含义不同，不能透传）。
+2. **已下载视频**（上一节实现）：还原真实 document_id 查 locations/downloads
+   → `tg://privatepost`。
+3. **其余**：分级提示（cache_only/private_chat/unknown），并引导绑定。
+
+**真实跳转验证**（`.temp/verify_jump_real.py`）：把 `t.me/feihsl/25158`
+绑定到 F642FDA8D3CD（docId `0x54C0B41B0000197F`），`os.startfile` 实际
+触发 `tg://resolve?domain=feihsl&post=25158`，Telegram 打开频道消息。
+
+**注意**：绑定文件跟随应用目录（开发模式=项目根；EXE=dist_windows）。
+两个目录各自独立，换运行方式需各自绑定一次（或拷贝 telegram_links.json）。
+
+### 13.3 测试
+
+新增 `tests/test_merge_and_bind.py`（套件名 `merge`，45 项）：doc_key 归属
+回归（共享 key_high 串台）、合并展示（归属分片剔除/孤立分片保留/搜索）、
+合成率与排序、链接解析（9 种合法格式 + 8 种非法拒绝）、绑定/解绑/跨扫描
+键命中。全套 410 项全过。

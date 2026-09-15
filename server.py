@@ -17,6 +17,7 @@ Telegram Desktop 缓存数据管理器 — Flask 后端
 import os
 import sys
 import json
+import re
 import hashlib
 import time
 import threading
@@ -154,9 +155,10 @@ file_index: Dict[str, CacheFile] = {}
 # file_name → CacheFile 索引, 用于按文件名快速查找 (避免 O(n) 遍历)
 file_name_index: Dict[str, CacheFile] = {}
 
-# 大视频 header 索引: key_high → (header_file_name, is_complete)
-# 由 _enrich_scan_with_binlog 构建, 避免 cache_file_to_dict 内 O(n²) 扫描
-large_video_header_index: Dict[int, str] = {}
+# 大视频 header 索引: doc_key (key_high, key_low>>16) → header 文件名
+# 由 _build_large_video_header_index 构建, 避免 cache_file_to_dict 内 O(n²) 扫描
+# 注意: 不能只按 key_high —— 不同视频会共享 key_high (取证确认)
+large_video_header_index: Dict[tuple, str] = {}
 
 
 def build_file_index():
@@ -488,22 +490,34 @@ def cache_file_to_dict(f: CacheFile) -> dict:
     # 检查是否已导出/已重建 (导出文件存在)
     is_rebuilt = _export_exists(f.file_id)
 
-    # 从 binlog 中获取 key_high (用于"前往 Telegram 播放")
+    # 从 binlog 中获取 key_high 与真实 document_id (用于"前往 Telegram 播放")
     key_high = 0
+    real_doc_id = 0
     if binlog_index:
         record = binlog_index.get(f.file_name)
         if record:
             key_high = record.key_high
+            real_doc_id = record.real_document_id
+
+    # 合成率 (大视频): 已覆盖字节 / 媒体总大小, 保留两位小数。
+    # 完整性判定仍以 coverage ⊇ required_ranges 为准 (完整 ⇔ 显示"完整");
+    # 合成率用于排序与展示非完整视频的覆盖程度。
+    synthesis_rate = None
+    if f.is_large_video and f.total_size:
+        synthesis_rate = round(
+            min(int(f.covered_bytes or 0), int(f.total_size))
+            / int(f.total_size) * 100, 2)
 
     # 分片信息: 查找父 header 和完整性 (使用预构建索引, O(1))
+    # 归属口径与覆盖率判定一致: doc_key (key_high, key_low>>16)
     parent_header_id = ''
     parent_is_complete = False
     is_orphan_slice = False
     if f.file_type == FileType.VIDEO_SLICE and binlog_index and scan_result:
         record = binlog_index.get(f.file_name)
         if record:
-            # 从 key_high → header 索引中查找 (避免 O(n²) 扫描)
-            header_name = large_video_header_index.get(record.key_high, '')
+            # 从 doc_key → header 索引中查找 (避免 O(n²) 扫描)
+            header_name = large_video_header_index.get(record.doc_key, '')
             if header_name:
                 header_file = file_index.get(header_name)
                 if header_file:
@@ -545,6 +559,8 @@ def cache_file_to_dict(f: CacheFile) -> dict:
         'has_thumbnail': _has_valid_thumbnail(f),
         'is_incomplete': False,  # 默认完整，api_file_detail 中按需设置
         'key_high': f'0x{key_high:016X}' if key_high else '',
+        'document_id': f'0x{real_doc_id:016X}' if real_doc_id else '',
+        'synthesis_rate': synthesis_rate,
         'display_name': display_name,
         'parent_header_id': parent_header_id,
         'parent_is_complete': parent_is_complete,
@@ -1013,12 +1029,119 @@ def api_batch_delete_files():
     })
 
 
+# ==================== Telegram 来源链接绑定 ====================
+# 背景 (2026-09-15, 13 轮取证 .temp/explore_jump*.py): 仅缓存未下载的视频,
+# Telegram **不在本地落盘任何消息关联** (docId 邻域无 msgId, 频道名/用户名
+# 也不在账号快照里), 无法自动反查 (peer, msg)。
+# 解决: 用户把原视频的 t.me 链接粘贴绑定一次, 之后「前往 Telegram 播放」
+# 即可精确跳转回去播放, 补全缓存分片。绑定按真实 document_id 存储,
+# 重新扫描后依然有效。
+
+TELEGRAM_LINKS_PATH = os.path.join(BASE_DIR, 'telegram_links.json')
+_telegram_links_cache: Optional[dict] = None
+_telegram_links_lock = threading.Lock()
+
+
+def _load_telegram_links() -> dict:
+    global _telegram_links_cache
+    if _telegram_links_cache is None:
+        try:
+            with open(TELEGRAM_LINKS_PATH, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            _telegram_links_cache = data if isinstance(data, dict) else {}
+        except Exception:
+            _telegram_links_cache = {}
+    return _telegram_links_cache
+
+
+def _save_telegram_links() -> None:
+    if _telegram_links_cache is None:
+        return
+    tmp = TELEGRAM_LINKS_PATH + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        json.dump(_telegram_links_cache, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, TELEGRAM_LINKS_PATH)
+
+
+def _telegram_link_keys(f: 'CacheFile') -> List[str]:
+    """一个文件的绑定键: 优先真实 document_id (重扫描后仍有效), 兜底文件 id"""
+    keys = []
+    if binlog_index:
+        r = binlog_index.get(f.file_name)
+        if r:
+            keys.append(f'doc:{r.real_document_id:016X}')
+    keys.append(f'file:{f.file_id}')
+    return keys
+
+
+def _get_telegram_link(f: 'CacheFile') -> Optional[dict]:
+    links = _load_telegram_links()
+    for k in _telegram_link_keys(f):
+        v = links.get(k)
+        if isinstance(v, dict) and v.get('tg_url'):
+            return v
+    return None
+
+
+def _parse_telegram_link(url: str) -> Optional[dict]:
+    """
+    解析用户提供的 Telegram 链接 → {tg_url, display}。
+
+    支持:
+      https://t.me/<username>/<msg>   → tg://resolve?domain=<username>&post=<msg>
+      https://t.me/c/<id>/<msg>       → tg://privatepost?channel=<id>&post=<msg>
+      https://t.me/<username>         → tg://resolve?domain=<username> (只开频道)
+      tg://resolve?... / tg://privatepost?...  → 原样使用
+    ?single&t=4 之类的展示参数会被忽略 (tg:// 链接的 t 参数是话题 id,
+    与网页链接的跳转秒数含义不同, 不能透传)。
+    """
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+
+    if url.startswith('tg://'):
+        rest = url[5:]
+        if rest.startswith(('resolve', 'privatepost')):
+            return {'tg_url': url, 'display': url}
+        return None
+
+    display = url.split('?')[0].split('#')[0]
+    # 私有频道/群: t.me/c/<id>/<msg>
+    m = re.match(r'^(?:https?://)?(?:t\.me|telegram\.me)/c/(\d+)(?:/(\d+))?',
+                 url, re.IGNORECASE)
+    if m:
+        tg = f'tg://privatepost?channel={m.group(1)}'
+        if m.group(2):
+            tg += f'&post={m.group(2)}'
+        return {'tg_url': tg, 'display': display}
+
+    # 公开频道/用户名: t.me/<username>/<msg>
+    m = re.match(r'^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,64})'
+                 r'(?:/(\d+))?', url, re.IGNORECASE)
+    if m:
+        tg = f'tg://resolve?domain={m.group(1)}'
+        if m.group(2):
+            tg += f'&post={m.group(2)}'
+        return {'tg_url': tg, 'display': display}
+    return None
+
+
+def _is_attributed_slice(f: 'CacheFile') -> bool:
+    """该文件是否是已归属到大视频 header 的分片 (合并展示时不再单独成行)"""
+    if f.file_type != FileType.VIDEO_SLICE or not binlog_index:
+        return False
+    r = binlog_index.get(f.file_name)
+    return bool(r and r.doc_key in large_video_header_index)
+
+
 @app.route('/api/file/<file_id>/open_in_telegram', methods=['POST'])
 def api_open_in_telegram(file_id):
     """
     在 Telegram Desktop 中打开/播放对应的原视频
 
     跳转策略 (优先级从高到低):
+    0. 用户手动绑定的来源链接 (telegram_links.json) —— 仅缓存未下载的视频
+       本地无法自动反查 (取证确认), 绑定一次 t.me 链接后即可精确跳转
     1. 从 binlog 记录还原真实 document_id, 查 locations + downloads 索引
        → {peerId, msgId} → tg:// URL
        - Channel/Megagroup/Chat: tg://privatepost?channel=<bareId>&post=<msgId>
@@ -1054,12 +1177,18 @@ def api_open_in_telegram(file_id):
     key_high = record.key_high if record else 0
     real_doc_id = record.real_document_id if record else 0
 
-    # 尝试从 locations + downloads 索引查找 tg:// URL
+    # 尝试获取 tg:// URL
     tg_url = None
     peer_info = None
-    location_status = 'unknown'  # downloaded / cache_only / unknown
+    location_status = 'unknown'  # bound / downloaded / cache_only / private_chat / unknown
 
-    if location_index and location_index.is_loaded:
+    # 策略0: 用户绑定的来源链接 (最高优先级)
+    bound = _get_telegram_link(f)
+    if bound:
+        tg_url = bound['tg_url']
+        location_status = 'bound'
+
+    if not tg_url and location_index and location_index.is_loaded:
         # 策略1: 用还原的真实 document_id 查找 (locations 存完整 64 位 id)
         entry = None
         if real_doc_id:
@@ -1088,15 +1217,17 @@ def api_open_in_telegram(file_id):
                 location_status = 'private_chat'
 
     launched = False
-    if tg_url:
+    if tg_url and location_status == 'bound':
+        hint = '已跳转到绑定的 Telegram 消息'
+    elif tg_url:
         hint = '已跳转到 Telegram 对应消息'
     elif location_status == 'private_chat':
         hint = '该文件来自私聊, Telegram Desktop 不支持私聊消息跳转链接, 已打开 Telegram'
     elif location_status == 'cache_only':
         hint = ('该视频仅缓存未下载, 本地没有它的来源消息记录; '
-                '若在 Telegram 中下载/保存该视频后重试, 即可精确定位')
+                '在下方绑定原视频的 t.me 链接后即可精确跳转')
     else:
-        hint = '未找到该文件的来源记录, 请在 Telegram 中搜索播放'
+        hint = '未找到该文件的来源记录; 可在下方绑定原视频的 t.me 链接'
 
     try:
         if tg_url:
@@ -1137,8 +1268,56 @@ def api_open_in_telegram(file_id):
         'location_status': location_status,
         'tg_url': tg_url,
         'peer_info': peer_info,
+        'telegram_link': bound,
         'hint': hint,
     })
+
+
+@app.route('/api/file/<file_id>/bind_telegram', methods=['POST'])
+def api_bind_telegram(file_id):
+    """绑定原视频的 t.me 链接 (仅缓存未下载的视频本地无消息关联, 绑定后可精确跳转)"""
+    f = find_file_by_id(file_id)
+    if f is None:
+        return jsonify({'error': '文件未找到'}), 404
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    parsed = _parse_telegram_link(url)
+    if not parsed:
+        return jsonify({
+            'error': '无法识别的链接。请粘贴形如 https://t.me/频道名/消息号 的地址, '
+                     '或 tg:// 开头的链接',
+        }), 400
+    entry = {
+        'tg_url': parsed['tg_url'],
+        'source_url': url,
+        'display': parsed['display'],
+        'bound_at': time.time(),
+    }
+    with _telegram_links_lock:
+        links = _load_telegram_links()
+        # 两个键都写: doc: (跨扫描稳定) + file: (无 binlog 时兜底)
+        for k in _telegram_link_keys(f):
+            links[k] = entry
+        _save_telegram_links()
+    return jsonify({'ok': True, 'telegram_link': entry})
+
+
+@app.route('/api/file/<file_id>/bind_telegram', methods=['DELETE'])
+def api_unbind_telegram(file_id):
+    """解除 Telegram 来源链接绑定"""
+    f = find_file_by_id(file_id)
+    if f is None:
+        return jsonify({'error': '文件未找到'}), 404
+    with _telegram_links_lock:
+        links = _load_telegram_links()
+        removed = False
+        for k in _telegram_link_keys(f):
+            if k in links:
+                links.pop(k)
+                removed = True
+        if removed:
+            _save_telegram_links()
+    return jsonify({'ok': True, 'removed': removed})
 
 
 @app.route('/')
@@ -1770,6 +1949,13 @@ def api_files():
     # 筛选 (拷贝避免并发修改)
     with files_lock:
         files = list(files)
+
+    # ==================== 分片合并展示 ====================
+    # 一个视频 = 一条记录 (以 header 为唯一标识)。已归属到某 header 的分片
+    # 不再单独成行 —— 它们已计入该视频的合成率, 单独展示只会让画面充满
+    # 千篇一律的 8MB 碎片。孤立分片 (所属 header 不在缓存里) 仍保留展示。
+    files = [f for f in files if not _is_attributed_slice(f)]
+
     if category:
         files = [f for f in files if f.category == category]
         if category == 'video':
@@ -1786,25 +1972,29 @@ def api_files():
     if search:
         files = [f for f in files if search in f.file_name.lower()]
 
-    # 排序: 已重建/完整的大视频优先, 然后按用户选择的排序方式
-    def _sort_priority(f: CacheFile) -> int:
-        """排序优先级: 0=已重建/完整, 1=大视频未重建, 2=其他"""
-        if f.is_large_video:
-            if _export_exists(f.file_id):
-                return 0  # 已重建
-            if f.is_complete_large_video:
-                return 0  # 完整可重建
-            return 1  # 大视频但不完整
-        return 2  # 其他文件
+    # 排序: 大视频按合成率从大到小 —— 完整的 (合成率 100%/覆盖齐全) 排最前,
+    # 其余大视频按合成率降序排在后面; 非大视频保持用户选择的排序方式垫底。
+    def _synthesis_rate(f: CacheFile) -> float:
+        if f.total_size:
+            return min(int(f.covered_bytes or 0), int(f.total_size)) / int(f.total_size)
+        return 0.0
 
     if sort == 'size_desc':
-        files.sort(key=lambda f: (_sort_priority(f), -f.decrypted_size))
+        sub_key = lambda f: -f.decrypted_size  # noqa: E731
     elif sort == 'size_asc':
-        files.sort(key=lambda f: (_sort_priority(f), f.decrypted_size))
+        sub_key = lambda f: f.decrypted_size  # noqa: E731
     elif sort == 'name':
-        files.sort(key=lambda f: (_sort_priority(f), f.file_name))
-    elif sort == 'type':
-        files.sort(key=lambda f: (_sort_priority(f), f.file_type.value))
+        sub_key = lambda f: f.file_name  # noqa: E731
+    else:  # type
+        sub_key = lambda f: f.file_type.value  # noqa: E731
+
+    def _sort_key(f: CacheFile):
+        if f.is_large_video:
+            grp = 0 if f.is_complete_large_video else 1
+            return (grp, -_synthesis_rate(f), sub_key(f))
+        return (2, -1.0, sub_key(f))
+
+    files.sort(key=_sort_key)
 
     total = len(files)
     start = (page - 1) * per_page
@@ -1828,6 +2018,8 @@ def api_file_detail(file_id):
         return jsonify({'error': '文件未找到'}), 404
 
     info = cache_file_to_dict(f)
+    # Telegram 来源链接绑定状态 (预览弹窗据此显示绑定/解绑界面)
+    info['telegram_link'] = _get_telegram_link(f)
 
     # ==================== 完整性判定 ====================
     # 全部基于 box 遍历与覆盖率, 不再用 bytes.find(b'moov') 猜 atom 是否存在。
@@ -1926,11 +2118,12 @@ def api_file_detail(file_id):
             if record:
                 slice_info['slice_index'] = record.slice_index
                 slice_info['key_high'] = f'0x{record.key_high:016X}'
-                # 优先用预构建索引 (O(1)); 索引缺失时才退化为一次有界查找
-                parent = large_video_header_index.get(record.key_high, '')
+                # 优先用预构建索引 (O(1), 按 doc_key 归属);
+                # 索引缺失时才退化为一次有界查找
+                parent = large_video_header_index.get(record.doc_key, '')
                 if not parent:
                     for fname2, r2 in binlog_index.items():
-                        if r2.key_high == record.key_high and r2.slice_index == 0:
+                        if r2.doc_key == record.doc_key and r2.slice_index == 0:
                             parent = fname2
                             break
                 if parent and parent in file_index:
@@ -3126,7 +3319,13 @@ def _enrich_scan(result, bidx=None):
 
 
 def _build_large_video_header_index():
-    """构建 key_high → header 文件名的映射 (用于分片快速找父 header)"""
+    """构建 doc_key → header 文件名的映射 (用于分片快速找父 header)
+
+    **必须按 doc_key (key_high, key_low>>16) 归属, 不能只按 key_high**:
+    不同视频会共享同一个 key_high (2026-09-15 取证实测, 同一 key_high 下混有
+    7 个不同视频)。只按 key_high 会把 B 视频的分片归属到 A 视频名下 ——
+    分片合并展示后这会直接导致 A 吞掉 B 的分片、B 永远显示缺分片。
+    """
     global large_video_header_index
     large_video_header_index = {}
     if not binlog_index or not scan_result:
@@ -3135,7 +3334,7 @@ def _build_large_video_header_index():
         if f.is_large_video:
             r = binlog_index.get(f.file_name)
             if r and r.slice_index == 0:
-                large_video_header_index[r.key_high] = f.file_name
+                large_video_header_index[r.doc_key] = f.file_name
 
 
 def _is_valid_mp4_export(path: str, file_id: str = '') -> bool:

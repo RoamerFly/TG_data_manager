@@ -402,17 +402,24 @@ function renderFiles(data) {
         // 分片和大视频的特殊标识
         let extraBadge = '';
         if (isLargeVideo) {
+            // 合并展示后一个视频一条记录: 完整的标"完整"排最前,
+            // 其余标"合成率 X.XX%"(覆盖率口径) 按合成率降序排在后面
+            const tags = [];
             if (f.is_rebuilt) {
                 // 已重建但要如实区分"完整"与"局部片段" —— 否则用户会以为
                 // 拿到的是完整视频, 播到一半停住时完全摸不着头脑
-                extraBadge = f.is_complete_large_video
+                tags.push(f.is_complete_large_video
                     ? '<span class="file-card-tag tag-rebuilt">已重建</span>'
-                    : '<span class="file-card-tag tag-rebuilt">已重建 · 局部</span>';
-            } else if (f.is_complete_large_video) {
-                extraBadge = '<span class="file-card-tag tag-complete">完整</span>';
-            } else {
-                extraBadge = '<span class="file-card-tag tag-large">大视频</span>';
+                    : '<span class="file-card-tag tag-rebuilt">已重建 · 局部</span>');
             }
+            if (f.is_complete_large_video) {
+                tags.push('<span class="file-card-tag tag-complete">完整</span>');
+            } else if (f.synthesis_rate !== null && f.synthesis_rate !== undefined) {
+                tags.push(`<span class="file-card-tag tag-rate">合成率 ${Number(f.synthesis_rate).toFixed(2)}%</span>`);
+            } else {
+                tags.push('<span class="file-card-tag tag-large">大视频</span>');
+            }
+            extraBadge = tags.join('');
         } else if (isSlice) {
             if (f.parent_header_id) {
                 if (f.parent_is_complete) {
@@ -875,6 +882,7 @@ async function openPreview(fileId) {
         const f = await api(`/api/file/${fileId}`);
 
         $('preview-title').textContent = f.display_name || f.file_type_label;
+        renderTelegramBindBox(f);
 
         if (f.category === 'image') {
             body.innerHTML = `<img class="preview-image" src="/api/preview/${fileId}" alt="预览" onclick="toggleImageZoom(this)">`;
@@ -1421,6 +1429,78 @@ async function deleteCacheFile(fileId) {
     }
 }
 
+// ==================== Telegram 来源链接绑定 ====================
+// 仅缓存未下载的视频, 本地没有消息关联 (后端取证结论), 无法自动定位原消息。
+// 绑定一次 t.me 链接后, "前往 Telegram 播放"即可精确跳转回去补全分片。
+function renderTelegramBindBox(f) {
+    const box = $('telegram-bind-box');
+    if (!box) return;
+    // 只在缓存视图下、对视频类文件 (非分片) 显示
+    if (state.viewMode === 'downloads' || f.category !== 'video' || f.file_type === 'video_slice') {
+        box.classList.add('hidden');
+        box.innerHTML = '';
+        return;
+    }
+    const link = f.telegram_link;
+    if (link && link.tg_url) {
+        box.classList.remove('hidden');
+        box.innerHTML = `
+            <div class="tg-bind-row">
+                <span class="tg-bind-label">Telegram 来源</span>
+                <span class="tg-bind-link" title="${escapeHtml(link.source_url || link.display || '')}">${escapeHtml(link.display || link.source_url || '')}</span>
+                <button class="btn btn-small" onclick="unbindTelegram('${f.file_id}')">解绑</button>
+            </div>`;
+    } else {
+        box.classList.remove('hidden');
+        box.innerHTML = `
+            <div class="tg-bind-row">
+                <span class="tg-bind-label">绑定来源</span>
+                <input id="tg-bind-input" class="tg-bind-input" type="text"
+                       placeholder="https://t.me/频道名/消息号" spellcheck="false">
+                <button class="btn btn-small btn-secondary" onclick="bindTelegram('${f.file_id}')">绑定</button>
+            </div>
+            <div class="tg-bind-hint">仅缓存未下载的视频无法自动定位原消息 —— 粘贴原视频的 t.me 链接绑定一次, 之后可一键跳转回去播放、补全缓存分片</div>`;
+    }
+}
+
+async function bindTelegram(fileId) {
+    const input = $('tg-bind-input');
+    const url = input ? input.value.trim() : '';
+    if (!url) {
+        toast('请先粘贴原视频的 t.me 链接', 'error');
+        return;
+    }
+    try {
+        await api(`/api/file/${fileId}/bind_telegram`, {
+            method: 'POST',
+            body: JSON.stringify({ url }),
+        });
+        toast('已绑定来源, 现在可以精确跳转了', 'success');
+        await refreshBindBox(fileId);
+    } catch (e) {
+        toast('绑定失败: ' + e.message, 'error');
+    }
+}
+
+async function unbindTelegram(fileId) {
+    try {
+        await api(`/api/file/${fileId}/bind_telegram`, { method: 'DELETE' });
+        toast('已解除绑定', 'info');
+        await refreshBindBox(fileId);
+    } catch (e) {
+        toast('解绑失败: ' + e.message, 'error');
+    }
+}
+
+async function refreshBindBox(fileId) {
+    try {
+        const f = await api(`/api/file/${fileId}`);
+        renderTelegramBindBox(f);
+    } catch (e) {
+        // 刷新失败不影响主流程
+    }
+}
+
 // ==================== 前往 Telegram 播放 ====================
 async function openInTelegram() {
     const fileId = state.currentPreviewId;
@@ -1434,29 +1514,14 @@ async function openInTelegram() {
     try {
         const result = await api(`/api/file/${fileId}/open_in_telegram`, { method: 'POST' });
         if (result.ok) {
-            if (result.tg_url) {
-                let msg = '已跳转到 Telegram 对应消息';
-                if (result.peer_info) {
-                    const pi = result.peer_info;
-                    msg += `\n来源: ${pi.peer_type}`;
-                    if (pi.path) msg += `\n文件: ${pi.path}`;
-                }
-                toast(msg, 'success');
-            } else if (result.hint) {
-                // 后端按定位状态给出具体原因 (仅缓存未下载 / 私聊不支持跳转 / 无记录)
-                let msg = result.hint;
-                if (result.document_id) {
-                    msg += `\n文档 ID: ${result.document_id}`;
-                }
-                toast(msg, 'info');
-            } else {
-                let msg = '已启动 Telegram Desktop';
-                if (result.document_id) {
-                    msg += `\n文档 ID: ${result.document_id}`;
-                }
-                msg += '\n未找到精确跳转信息, 请在 Telegram 中搜索播放该文件';
-                toast(msg, 'info');
+            // hint 由后端按定位状态给出 (绑定跳转 / 自动定位 / 仅缓存未下载 / 私聊)
+            let msg = result.hint || '已启动 Telegram Desktop';
+            if (result.peer_info) {
+                const pi = result.peer_info;
+                msg += `\n来源: ${pi.peer_type}`;
+                if (pi.path) msg += `\n文件: ${pi.path}`;
             }
+            toast(msg, result.tg_url ? 'success' : 'info');
         } else {
             toast('启动失败: ' + (result.error || result.hint || '未知错误'), 'error');
         }

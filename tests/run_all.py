@@ -14,6 +14,7 @@
   pipeline     导出管线: 四道验证门 / sidecar / 原子提交 / 失效
   e2e          导出编排 produce() 的完整流程
   server       Flask 接口集成 (合成 tdata, 无需真实 Telegram 数据)
+  merge        分片合并展示 / 合成率排序 / doc_key 归属 / t.me 链接绑定
   clear        清空缓存/下载目录: 三步安全红线 (合成 tdata, 不碰真实数据)
   ui           前端 DOM 级验证 (需要 jsdom, 见下)
 
@@ -42,6 +43,7 @@ ORDER = [
     ('pipeline', [PY, 'tests/test_export_pipeline.py']),
     ('e2e', [PY, 'tests/test_e2e_export.py']),
     ('server', [PY, 'tests/test_server_integration.py']),
+    ('merge', [PY, 'tests/test_merge_and_bind.py']),
     ('clear', [PY, 'tests/test_clear_cache.py']),
 ]
 
