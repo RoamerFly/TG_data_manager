@@ -18,5 +18,8 @@ thumbnails/
 .temp/
 telegram_links.json
 
+# 内部文档 (只本地保留, 不入库)
+docs/UI_SPEC.md
+
 # 工具目录
 .workbuddy/
