@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#174f9b"/>
+      <stop offset="0.38" stop-color="#3c82c5"/>
+      <stop offset="0.7" stop-color="#78b4dd"/>
+      <stop offset="1" stop-color="#d8edf7"/>
+    </linearGradient>
+    <radialGradient id="galaxy" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#f2fbff" stop-opacity=".96"/>
+      <stop offset=".16" stop-color="#b4ddff" stop-opacity=".72"/>
+      <stop offset=".43" stop-color="#8d8eea" stop-opacity=".34"/>
+      <stop offset="1" stop-color="#4e61b8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="aurora" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d6f6ff" stop-opacity="0"/>
+      <stop offset=".45" stop-color="#c7efff" stop-opacity=".52"/>
+      <stop offset=".72" stop-color="#cabfff" stop-opacity=".3"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="mountainBack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#effaff"/>
+      <stop offset=".32" stop-color="#9dc6e0"/>
+      <stop offset="1" stop-color="#376b96"/>
+    </linearGradient>
+    <linearGradient id="mountainMid" x1="0" y1="0" x2=".75" y2="1">
+      <stop offset="0" stop-color="#f8fdff"/>
+      <stop offset=".28" stop-color="#b7d5e7"/>
+      <stop offset=".6" stop-color="#537fa5"/>
+      <stop offset="1" stop-color="#244e77"/>
+    </linearGradient>
+    <linearGradient id="lake" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8cc7e4" stop-opacity=".92"/>
+      <stop offset=".26" stop-color="#5391bc" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#174978"/>
+    </linearGradient>
+    <linearGradient id="tree" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#285f8a"/>
+      <stop offset="1" stop-color="#103b65"/>
+    </linearGradient>
+    <linearGradient id="snow" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#fff"/>
+      <stop offset="1" stop-color="#c5e5f4"/>
+    </linearGradient>
+    <pattern id="starDust" width="118" height="94" patternUnits="userSpaceOnUse">
+      <circle cx="8" cy="16" r="1.1" fill="#fff" opacity=".72"/>
+      <circle cx="53" cy="9" r=".7" fill="#dff7ff" opacity=".8"/>
+      <circle cx="102" cy="28" r="1.4" fill="#fff" opacity=".58"/>
+      <circle cx="31" cy="57" r=".8" fill="#fff" opacity=".52"/>
+      <circle cx="76" cy="72" r="1" fill="#e6f8ff" opacity=".7"/>
+      <circle cx="112" cy="84" r=".55" fill="#fff" opacity=".75"/>
+      <circle cx="18" cy="89" r=".45" fill="#fff" opacity=".55"/>
+    </pattern>
+    <filter id="blur18"><feGaussianBlur stdDeviation="18"/></filter>
+    <filter id="blur38"><feGaussianBlur stdDeviation="38"/></filter>
+    <filter id="glow"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="soft"><feGaussianBlur stdDeviation="2.2"/></filter>
+    <symbol id="spark" viewBox="-20 -20 40 40">
+      <path d="M0-18C1-5 5-1 18 0 5 1 1 5 0 18-1 5-5 1-18 0-5-1-1-5 0-18Z" fill="#fff"/>
+      <circle r="3.2" fill="#fff"/>
+    </symbol>
+    <symbol id="pine" viewBox="0 0 80 180">
+      <path d="M38 180h6V52h-6z" fill="#173e5b"/>
+      <path d="M41 0 13 58h17L5 100h21L0 145h80l-26-45h21L51 58h17Z" fill="url(#tree)"/>
+      <path d="M41 4 29 52h10L24 92h15l-18 39h18V4Z" fill="#4c83a6" opacity=".42"/>
+      <path d="M23 55h18L13 72l6-12Zm0 45h19L9 119l8-14Zm36-31H43l23 14-4-10Zm7 48H43l28 15-3-10Z" fill="url(#snow)" opacity=".78"/>
+    </symbol>
+  </defs>
+
+  <rect width="1600" height="1000" fill="url(#sky)"/>
+  <rect width="1600" height="620" fill="url(#starDust)" opacity=".92"/>
+
+  <!-- luminous galactic band -->
+  <g transform="rotate(-8 850 95)">
+    <ellipse cx="820" cy="86" rx="620" ry="98" fill="url(#galaxy)" filter="url(#blur38)" opacity=".9"/>
+    <path d="M235 128C506 34 748 9 1032 52c161 24 273 13 420-18" fill="none" stroke="url(#aurora)" stroke-width="78" filter="url(#blur18)" opacity=".9"/>
+    <path d="M322 91C590 42 846 28 1190 72" fill="none" stroke="#d8f3ff" stroke-width="8" filter="url(#blur18)" opacity=".48"/>
+  </g>
+  <ellipse cx="1040" cy="48" rx="345" ry="82" fill="#a1caff" filter="url(#blur38)" opacity=".22"/>
+  <ellipse cx="570" cy="164" rx="390" ry="46" fill="#8fd9ed" filter="url(#blur38)" opacity=".18"/>
+
+  <!-- brighter stars -->
+  <g filter="url(#glow)" opacity=".96">
+    <use href="#spark" x="500" y="34" width="34" height="34"/>
+    <use href="#spark" x="737" y="118" width="26" height="26"/>
+    <use href="#spark" x="1085" y="52" width="42" height="42"/>
+    <use href="#spark" x="1382" y="182" width="25" height="25"/>
+    <use href="#spark" x="1136" y="282" width="18" height="18"/>
+    <use href="#spark" x="194" y="249" width="22" height="22"/>
+    <use href="#spark" x="16" y="430" width="34" height="34"/>
+    <use href="#spark" x="1486" y="376" width="21" height="21"/>
+  </g>
+  <g fill="#fff">
+    <circle cx="313" cy="93" r="2.2"/><circle cx="386" cy="205" r="1.8"/><circle cx="458" cy="62" r="1.4"/>
+    <circle cx="629" cy="225" r="2.1"/><circle cx="687" cy="75" r="1.6"/><circle cx="842" cy="193" r="1.7"/>
+    <circle cx="936" cy="109" r="2.4"/><circle cx="1003" cy="221" r="1.3"/><circle cx="1198" cy="127" r="1.8"/>
+    <circle cx="1282" cy="261" r="2"/><circle cx="1481" cy="88" r="1.4"/>
+  </g>
+
+  <!-- atmospheric mist -->
+  <path d="M0 420C250 362 395 458 626 416s400-37 584 9 270-1 390-36v260H0Z" fill="#c8e8f5" opacity=".23" filter="url(#blur18)"/>
+
+  <!-- distant mountain range -->
+  <path d="M0 704 118 620l72 35 118-158 87 104 78-72 83 105 106-159 92 136 78-92 105 115 112-155 93 123 87-86 92 114 91-94 138 168v196H0Z" fill="url(#mountainBack)" opacity=".74"/>
+  <path d="m112 621 78 34 118-158 36 43-44 1-48 68-35-7-27 53Zm410 3 140-149 48 70-48-22-41 61-36-10Zm566-1 131-154 49 66-47-14-37 55-37-12Zm236 18 80-95 49 60-39-9-29 44Z" fill="#f5fcff" opacity=".9"/>
+
+  <!-- near mountain range -->
+  <path d="M0 784 104 659l58 66 113-194 102 152 95-94 116 139 93-86 100 95 118-181 106 134 86-89 105 118 83-83 151 148v216H0Z" fill="url(#mountainMid)"/>
+  <path d="m104 659 58 66 113-194 47 70-48-19-39 74-31-13-42 82Zm470 53 107-70 46 43-43-15-31 25-29-8Zm325 25 118-181 58 73-53-18-36 61-34-10Zm292-18 105-118 47 52-43-10-31 43-26-9Z" fill="#f8fdff" opacity=".92"/>
+
+  <!-- lake and reflections -->
+  <path d="M0 736c260 24 382 16 594 4s384 15 554 1 295-24 452 9v250H0Z" fill="url(#lake)"/>
+  <g opacity=".2" fill="#e9fbff" filter="url(#soft)">
+    <path d="M128 764h455l-69 8H62Z"/><path d="M864 782h482l79 8H781Z"/><path d="M218 824h712l-91 9H147Z"/>
+    <path d="M1042 877h441l59 8H984Z"/><path d="M35 922h604l-88 8H0Z"/>
+  </g>
+  <g opacity=".2" fill="#b8e5f5">
+    <path d="m275 531 70 197-134 0Z"/><path d="m1017 556 89 186-176 0Z"/><path d="m1296 601 75 143-144 0Z"/>
+  </g>
+
+  <!-- forest silhouettes -->
+  <g opacity=".92">
+    <use href="#pine" x="8" y="588" width="102" height="228"/>
+    <use href="#pine" x="68" y="626" width="81" height="190"/>
+    <use href="#pine" x="125" y="562" width="108" height="252"/>
+    <use href="#pine" x="204" y="640" width="76" height="176"/>
+    <use href="#pine" x="268" y="596" width="95" height="220"/>
+    <use href="#pine" x="345" y="656" width="70" height="160"/>
+    <use href="#pine" x="1168" y="632" width="82" height="190"/>
+    <use href="#pine" x="1232" y="575" width="104" height="241"/>
+    <use href="#pine" x="1310" y="638" width="78" height="180"/>
+    <use href="#pine" x="1370" y="550" width="113" height="266"/>
+    <use href="#pine" x="1460" y="611" width="91" height="205"/>
+    <use href="#pine" x="1522" y="568" width="110" height="246"/>
+  </g>
+
+  <!-- foreground snow banks and close pines -->
+  <path d="M0 856c129-58 251-34 380 16 156 60 250 42 389-2 186-59 343-47 472 1 132 49 244 38 359-10v139H0Z" fill="#d9eff8" opacity=".7"/>
+  <g opacity=".76">
+    <use href="#pine" x="-34" y="680" width="130" height="300"/>
+    <use href="#pine" x="57" y="732" width="105" height="248"/>
+    <use href="#pine" x="151" y="688" width="124" height="292"/>
+    <use href="#pine" x="1384" y="699" width="125" height="281"/>
+    <use href="#pine" x="1487" y="657" width="145" height="323"/>
+  </g>
+  <rect y="975" width="1600" height="25" fill="#123f69" opacity=".38"/>
+</svg>

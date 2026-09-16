@@ -76,6 +76,41 @@ function toggleTheme() {
     applyTheme(state.theme === 'light' ? 'dark' : 'light');
 }
 
+// ==================== 桌面窗口壳层 ====================
+// 仅在 pywebview 以 ?desktop=1 启动时启用；普通浏览器访问不显示窗口按钮。
+const isDesktopShell = new URLSearchParams(window.location.search).get('desktop') === '1';
+if (isDesktopShell) document.body.classList.add('desktop-shell');
+
+async function invokeDesktopWindowAction(action) {
+    if (!isDesktopShell || !window.pywebview || !window.pywebview.api) return;
+    try {
+        if (action === 'minimize') {
+            await window.pywebview.api.window_minimize();
+        } else if (action === 'maximize') {
+            const maximized = await window.pywebview.api.window_toggle_maximize();
+            document.body.classList.toggle('window-maximized', !!maximized);
+        } else if (action === 'close') {
+            await window.pywebview.api.window_close();
+        }
+    } catch (e) {
+        console.error('窗口操作失败:', e);
+    }
+}
+
+document.querySelectorAll('[data-window-action]').forEach(button => {
+    button.addEventListener('click', event => {
+        event.stopPropagation();
+        invokeDesktopWindowAction(button.dataset.windowAction);
+    });
+});
+
+document.querySelectorAll('.pywebview-drag-region').forEach(region => {
+    region.addEventListener('dblclick', event => {
+        if (!isDesktopShell || event.target.closest('button')) return;
+        invokeDesktopWindowAction('maximize');
+    });
+});
+
 // ==================== 选中计数徽标 ====================
 function updateSelectedBadge() {
     const badge = $('selected-badge');
@@ -253,6 +288,8 @@ function updateScanProgress(status) {
     el.scanProgressCount.textContent = status.total > 0
         ? `${status.progress} / ${status.total}`
         : '';
+    const pctEl = $('scan-progress-percent');
+    if (pctEl) pctEl.textContent = Math.round(pct) + '%';
 }
 
 async function onScanFinished(status) {
@@ -301,6 +338,19 @@ async function loadStats() {
         $('stat-unknown').textContent = stats.by_category.unknown || 0;
         $('stat-time').textContent = stats.scan_time + 's';
         el.statsBar.classList.remove('hidden');
+
+        // 同步设计稿顶部概览，只映射已有统计结果，不引入新的业务口径。
+        const total = Number(stats.total_files || 0);
+        const decrypted = Number(stats.decrypted_files || 0);
+        const categories = stats.by_category || {};
+        const setText = (id, value) => { const node = $(id); if (node) node.textContent = value; };
+        setText('overview-total', total.toLocaleString());
+        setText('overview-rebuildable', Number(categories.video || 0).toLocaleString());
+        setText('overview-decrypted', decrypted.toLocaleString());
+        setText('overview-success-rate', total > 0 ? `成功率 ${(decrypted / total * 100).toFixed(1)}%` : '成功率 —');
+        setText('overview-category-total', total.toLocaleString());
+        setText('overview-category-line', `图片 ${categories.image || 0}　视频 ${categories.video || 0}　音频 ${categories.audio || 0}`);
+        setText('overview-cache-size', `扫描耗时 ${stats.scan_time || 0}s`);
 
         // 渲染分组标签
         renderGroupTabs(stats.by_cache_type || {});
@@ -381,6 +431,7 @@ function renderFiles(data) {
         el.fileGrid.innerHTML = '';
         el.emptyState.classList.remove('hidden');
         el.emptyState.querySelector('p').textContent = '没有符合条件的文件';
+        updateDashboardPreview([]);
         return;
     }
 
@@ -434,6 +485,12 @@ function renderFiles(data) {
 
         const hasDisplayName = !!f.display_name;
         const nameClass = hasDisplayName ? 'file-card-name has-display-name' : 'file-card-name';
+        let statusHtml = extraBadge;
+        if (!statusHtml) {
+            if (f.category === 'unknown') statusHtml = '<span class="file-status warn">未处理</span>';
+            else if (f.category === 'slice') statusHtml = '<span class="file-status warn">待合并</span>';
+            else statusHtml = '<span class="file-status success">已解码</span>';
+        }
         html += `
         <div class="file-card ${isSelected ? 'selected' : ''}" data-id="${f.file_id}" data-size="${f.decrypted_size || 0}" onclick="onCardClick(event, '${f.file_id}')">
             <input type="checkbox" class="file-card-checkbox" ${isSelected ? 'checked' : ''}
@@ -446,7 +503,7 @@ function renderFiles(data) {
                 ${showPlayIcon ? '<div class="play-overlay"><svg viewBox="0 0 24 24" width="32" height="32"><path fill="white" d="M8 5v14l11-7z"/></svg></div>' : ''}
             </div>
             <span class="file-card-badge ${badgeClass}">${f.category}</span>
-            ${extraBadge}
+            ${statusHtml}
             <div class="file-card-info">
                 <div class="${nameClass}" title="${escapeHtml(f.display_name || f.file_name)}">${escapeHtml(f.display_name || f.file_name)}</div>
                 <div class="file-card-meta">
@@ -454,6 +511,7 @@ function renderFiles(data) {
                     <span class="file-card-size">${formatSize(f.decrypted_size)}</span>
                 </div>
             </div>
+            <button class="file-row-action" type="button" title="预览与操作" onclick="event.stopPropagation(); openPreview('${f.file_id}')">⋮</button>
         </div>`;
     }
 
@@ -464,6 +522,7 @@ function renderFiles(data) {
 
     // 立即加载缩略图 (不等滚动)
     lazyLoadImages();
+    updateDashboardPreview(data.files);
 }
 
 // ==================== 页码分页组件 ====================
@@ -555,6 +614,7 @@ function renderDownloadFiles(data) {
         el.fileGrid.innerHTML = '';
         el.emptyState.classList.remove('hidden');
         el.emptyState.querySelector('p').textContent = '下载目录中没有文件';
+        updateDashboardPreview([]);
         return;
     }
 
@@ -580,7 +640,7 @@ function renderDownloadFiles(data) {
                 ${showPlayIcon ? '<div class="play-overlay"><svg viewBox="0 0 24 24" width="32" height="32"><path fill="white" d="M8 5v14l11-7z"/></svg></div>' : ''}
             </div>
             <span class="file-card-badge ${badgeClass}">${f.category}</span>
-            <span class="file-card-tag tag-download">下载</span>
+            <span class="file-status success">已下载</span>
             <div class="file-card-info">
                 <div class="file-card-name has-display-name" title="${escapeHtml(f.file_name)}">${escapeHtml(f.file_name)}</div>
                 <div class="file-card-meta">
@@ -588,6 +648,7 @@ function renderDownloadFiles(data) {
                     <span class="file-card-size">${formatSize(f.file_size)}</span>
                 </div>
             </div>
+            <button class="file-row-action" type="button" title="预览与操作" onclick="event.stopPropagation(); openDownloadPreview('${escapeHtml(f.file_id)}')">⋮</button>
         </div>`;
     }
 
@@ -596,6 +657,47 @@ function renderDownloadFiles(data) {
 
     el.fileGrid.innerHTML = html;
     lazyLoadImages();
+    updateDashboardPreview(data.files);
+}
+
+// 右侧预览坞复用现有缩略图与预览入口，完整操作仍由原预览模态框承担。
+function updateDashboardPreview(files) {
+    const dock = $('dashboard-preview');
+    const meta = $('dashboard-preview-meta');
+    if (!dock) return;
+
+    const list = Array.isArray(files) ? files : [];
+    const candidate = list.find(f => f.category === 'video') ||
+        list.find(f => f.category === 'image') || list[0];
+    if (!candidate) {
+        dock.disabled = true;
+        dock.classList.remove('has-media');
+        dock.style.backgroundImage = '';
+        if (meta) meta.textContent = '等待选择';
+        return;
+    }
+
+    const isDownload = state.viewMode === 'downloads';
+    const fileId = candidate.file_id;
+    const name = candidate.display_name || candidate.file_name || fileId;
+    const size = isDownload ? candidate.file_size : candidate.decrypted_size;
+    const thumbUrl = isDownload
+        ? `/api/download_thumbnail/${encodeURIComponent(fileId)}`
+        : `/api/thumbnail/${encodeURIComponent(fileId)}`;
+
+    if (candidate.category === 'video' || candidate.category === 'image') {
+        dock.classList.add('has-media');
+        dock.style.backgroundImage = `linear-gradient(rgba(7,36,72,.08),rgba(7,36,72,.32)), url("${thumbUrl}")`;
+    } else {
+        dock.classList.remove('has-media');
+        dock.style.backgroundImage = '';
+    }
+    dock.disabled = false;
+    dock.dataset.fileId = fileId;
+    dock.querySelector('.preview-caption strong').textContent = name;
+    dock.querySelector('.preview-caption small').textContent = '点击打开完整预览与文件操作';
+    if (meta) meta.textContent = `${String(candidate.category || 'file').toUpperCase()} · ${formatSize(size || 0)}`;
+    dock.onclick = () => isDownload ? openDownloadPreview(fileId) : openPreview(fileId);
 }
 
 // ==================== 下载文件预览 ====================
@@ -1702,6 +1804,8 @@ async function saveSettings() {
             method: 'POST',
             body: JSON.stringify(body),
         });
+        const pathNode = $('overview-download-path');
+        if (pathNode) pathNode.textContent = downloadPath || '未设置';
         toast('设置已保存', 'success');
         closeSettings();
         resetUIForRescan();
@@ -2055,6 +2159,8 @@ document.addEventListener('keydown', (e) => {
         const config = await api('/api/config');
         $('tdata-path-input').value = config.tdata_path;
         $('download-path-input').value = config.download_path || '';
+        const pathNode = $('overview-download-path');
+        if (pathNode) pathNode.textContent = config.download_path || '未设置';
     } catch (e) {
         console.error('初始化失败:', e);
     }

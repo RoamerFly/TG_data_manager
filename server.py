@@ -3436,6 +3436,91 @@ def _is_valid_mp4_export(path: str, file_id: str = '') -> bool:
 
 # ==================== 入口 ====================
 
+def _set_maximized_bounds(window) -> None:
+    """Keep a frameless WinForms window inside the monitor working area."""
+    native = getattr(window, 'native', None)
+    if native is None or sys.platform != 'win32':
+        return
+    try:
+        import clr
+        clr.AddReference('System.Windows.Forms')
+        from System import Action
+        from System.Windows.Forms import Screen
+
+        def apply_bounds():
+            native.MaximizedBounds = Screen.FromHandle(native.Handle).WorkingArea
+
+        native.Invoke(Action(apply_bounds))
+    except Exception as exc:
+        print(f"  无法约束最大化工作区: {exc}")
+
+
+class DesktopWindowApi:
+    """Expose only window commands to JavaScript, never the native window object."""
+
+    def __init__(self):
+        # pywebview recursively inspects public js_api attributes. Keeping the
+        # Window object public makes it walk the native WebView2 object graph.
+        self._window = None
+        self._maximized = False
+
+    def _bind(self, window):
+        self._window = window
+
+    def _mark_maximized(self):
+        self._maximized = True
+
+    def _mark_restored(self):
+        self._maximized = False
+
+    def window_minimize(self):
+        if self._window:
+            self._window.minimize()
+        return True
+
+    def window_toggle_maximize(self):
+        if not self._window:
+            return False
+        if self._maximized:
+            self._window.restore()
+            self._maximized = False
+        else:
+            _set_maximized_bounds(self._window)
+            self._window.maximize()
+            self._maximized = True
+        return self._maximized
+
+    def window_close(self):
+        if self._window:
+            self._window.destroy()
+        return True
+
+
+def _open_desktop_window(webview, url: str) -> None:
+    """Create and run the pywebview shell on the main thread."""
+    window_api = DesktopWindowApi()
+    desktop_window = webview.create_window(
+        'Telegram 缓存管理器',
+        url + '/?desktop=1',
+        js_api=window_api,
+        width=1200,
+        height=800,
+        x=None,
+        y=None,
+        fullscreen=False,
+        maximized=False,
+        min_size=(1180, 680),
+        frameless=True,
+        easy_drag=False,
+        shadow=True,
+        transparent=True,
+        background_color='#1F65A7',
+    )
+    window_api._bind(desktop_window)
+    desktop_window.events.maximized += window_api._mark_maximized
+    desktop_window.events.restored += window_api._mark_restored
+    webview.start()
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Telegram Desktop 缓存数据管理器')
@@ -3498,33 +3583,29 @@ def main():
 
     if use_webview:
         print("  正在打开桌面窗口...")
-        def _open_webview():
-            time.sleep(0.5)
-            webview.create_window(
-                'Telegram 缓存管理器',
-                url,
-                width=1200,
-                height=800,
-                min_size=(800, 600),
-            )
-            webview.start()
+        try:
+            _open_desktop_window(webview, url)
             # 窗口关闭后退出程序
             server.shutdown()
+            return
+        except Exception as exc:
+            # windowed EXE has no console, so never leave the user with a
+            # silently dead process when WebView2 initialization fails.
+            print(f"  桌面窗口启动失败, 回退到系统浏览器: {exc}")
 
-        _open_webview()
-    else:
-        # 回退: 打开浏览器
+    # 回退: 打开浏览器
+    if not use_webview:
         print("  (未安装 pywebview, 使用浏览器打开)")
-        import webbrowser
-        def _open_browser():
-            time.sleep(1.0)
-            webbrowser.open(url)
-        threading.Thread(target=_open_browser, daemon=True).start()
-        # 保持运行
-        try:
-            server_thread.join()
-        except KeyboardInterrupt:
-            server.shutdown()
+    import webbrowser
+    def _open_browser():
+        time.sleep(1.0)
+        webbrowser.open(url)
+    threading.Thread(target=_open_browser, daemon=True).start()
+    # 保持运行
+    try:
+        server_thread.join()
+    except KeyboardInterrupt:
+        server.shutdown()
 
 
 if __name__ == '__main__':

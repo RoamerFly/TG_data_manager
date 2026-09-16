@@ -88,6 +88,7 @@ echo.
     --onefile ^
     --windowed ^
     --name "TGCacheManager" ^
+    --icon "docs\icon.ico" ^
     --distpath dist_windows ^
     --workpath build ^
     --add-data "src;src" ^

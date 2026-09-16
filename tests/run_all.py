@@ -43,6 +43,7 @@ ORDER = [
     ('pipeline', [PY, 'tests/test_export_pipeline.py']),
     ('e2e', [PY, 'tests/test_e2e_export.py']),
     ('server', [PY, 'tests/test_server_integration.py']),
+    ('desktop', [PY, 'tests/test_desktop_shell.py']),
     ('merge', [PY, 'tests/test_merge_and_bind.py']),
     ('clear', [PY, 'tests/test_clear_cache.py']),
 ]
